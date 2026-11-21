@@ -29,6 +29,12 @@ function injectBypass(html) {
     return html;
 }
 
+function htmlResponse(html, original) {
+    const headers = new Headers(original ? original.headers : {});
+    headers.set('Content-Type', 'text/html; charset=utf-8');
+    return new Response(html, { headers });
+}
+
 self.addEventListener('fetch', (event) => {
     if (event.request.method !== 'GET') return;
     const url = new URL(event.request.url);
@@ -37,17 +43,28 @@ self.addEventListener('fetch', (event) => {
         event.respondWith(
             fetch(event.request)
                 .then((resp) => {
-                    const copy = resp.clone();
-                    caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
                     const ct = resp.headers.get('content-type') || '';
                     if (ct.indexOf('text/html') !== -1) {
-                        return resp.text().then((html) => new Response(injectBypass(html), {
-                            headers: { 'Content-Type': 'text/html; charset=utf-8' }
-                        }));
+                        return resp.text().then((html) => {
+                            const injected = injectBypass(html);
+                            caches.open(CACHE_NAME).then((cache) =>
+                                cache.put(event.request, htmlResponse(injected, resp))
+                            );
+                            return htmlResponse(injected, resp);
+                        });
                     }
+                    const copy = resp.clone();
+                    caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
                     return resp;
                 })
-                .catch(() => caches.match(event.request).then((r) => r || caches.match('./index.html')))
+                .catch(() => caches.match(event.request).then((r) => {
+                    if (!r) return caches.match('./index.html');
+                    const ct = r.headers.get('content-type') || '';
+                    if (ct.indexOf('text/html') !== -1) {
+                        return r.text().then((html) => htmlResponse(injectBypass(html), r));
+                    }
+                    return r;
+                }))
         );
         return;
     }
