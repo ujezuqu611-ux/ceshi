@@ -1,4 +1,67 @@
-// sw.js - 离线邮递员 (暴力兜底版)
+// sw.js - 离线兜底 Service Worker
+
+const CACHE_NAME = 'app-static-v1';
+
+self.addEventListener('install', (event) => {
+    self.skipWaiting();
+});
+
+self.addEventListener('activate', (event) => {
+    event.waitUntil(
+        caches.keys().then((keys) =>
+            Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)))
+        ).then(() => self.clients.claim())
+    );
+});
+
+// 把本地直进补丁注入页面（移除登录/激活码拦截，不改动原业务代码）
+function injectBypass(html) {
+    if (!html || html.indexOf('gate-bypass.js') !== -1) return html;
+    html = html.replace('<div id="activation-overlay">', '<div id="activation-overlay" style="display:none">');
+    html = html.replace(
+        '<script src="sms.js"></script>',
+        '<script src="sms.js"></script>\n    <script src="gate-bypass.js"></script>'
+    );
+    return html;
+}
+
+self.addEventListener('fetch', (event) => {
+    if (event.request.method !== 'GET') return;
+    const url = new URL(event.request.url);
+
+    if (event.request.mode === 'navigate') {
+        // 页面导航优先网络，注入补丁后回写缓存；断网时回退缓存
+        event.respondWith(
+            fetch(event.request)
+                .then((resp) => {
+                    const copy = resp.clone();
+                    caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+                    const ct = resp.headers.get('content-type') || '';
+                    if (ct.indexOf('text/html') !== -1) {
+                        return resp.text().then((html) => new Response(injectBypass(html), {
+                            headers: { 'Content-Type': 'text/html; charset=utf-8' }
+                        }));
+                    }
+                    return resp;
+                })
+                .catch(() => caches.match(event.request).then((r) => r || caches.match('./index.html')))
+        );
+        return;
+    }
+
+    event.respondWith(
+        caches.match(event.request).then((cached) => {
+            if (cached) return cached;
+            return fetch(event.request).then((resp) => {
+                if (resp.ok && url.origin === self.location.origin) {
+                    const copy = resp.clone();
+                    caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+                }
+                return resp;
+            });
+        })
+    );
+});
 
 self.addEventListener('push', function(event) {
     // 准备一个绝对不会失败的兜底通知
@@ -22,7 +85,7 @@ self.addEventListener('push', function(event) {
             if (deviceId) {
                 fetchUrl += `?deviceId=${deviceId}`;
             }
-            
+
             return fetch(fetchUrl)
             .then(res => {
                 if (!res.ok) throw new Error('Network response was not ok');
@@ -49,8 +112,8 @@ self.addEventListener('push', function(event) {
 });
 
 self.addEventListener('notificationclick', function(event) {
-    event.notification.close(); 
-    
+    event.notification.close();
+
     event.waitUntil(
         clients.matchAll({ type: 'window' }).then(windowClients => {
             for (let i = 0; i < windowClients.length; i++) {
